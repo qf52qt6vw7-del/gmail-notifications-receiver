@@ -214,16 +214,12 @@ console.log("[gmail] resolved connection", {
   status: conn.status
 });
 let accessToken = conn.access_token;
-
 const expiresAt = conn.expires_at ? new Date(conn.expires_at).getTime() : 0;
 
 if (!accessToken || Date.now() >= expiresAt - 60000) {
-  console.log("[gmail] refreshing google access token", {
-    connectionId: conn.id
-  });
+  console.log("[gmail] refreshing google access token", { connectionId: conn.id });
 
   const refreshed = await refreshGoogleAccessToken(conn.refresh_token);
-
   accessToken = refreshed.access_token;
 
   await sbPatch(
@@ -235,10 +231,11 @@ if (!accessToken || Date.now() >= expiresAt - 60000) {
     "return=minimal"
   );
 
-  console.log("[gmail] token refreshed", {
-    connectionId: conn.id
-  });
-  const historyResp = await fetch(
+  console.log("[gmail] token refreshed", { connectionId: conn.id });
+}
+
+// ALWAYS run history after token is valid
+const historyResp = await fetch(
   `https://gmail.googleapis.com/gmail/v1/users/me/history?` +
   `startHistoryId=${encodeURIComponent(historyId)}&` +
   `historyTypes=messageAdded&labelId=INBOX`,
@@ -252,7 +249,6 @@ if (!accessToken || Date.now() >= expiresAt - 60000) {
 );
 
 const historyText = await historyResp.text().catch(() => "");
-
 if (!historyResp.ok) {
   console.log("[gmail] history.list failed", {
     connectionId: conn.id,
@@ -426,7 +422,6 @@ console.log("[gmail] inbound message inserted", {
   messageId,
   internetMessageId
 });
-}
 }
 // Next step will process this
 const latestHistoryId = historyJson?.historyId || historyId;
