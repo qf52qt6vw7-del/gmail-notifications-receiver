@@ -515,6 +515,7 @@ if (latestHistoryId) {
     });
   }
 }
+  }
   } catch (err) {
     console.log("[gmail] handler error", err?.message || err);
 
