@@ -130,6 +130,12 @@ GMAIL PUBSUB PUSH ENDPOINT
 */
 app.post("/email/gmail/notifications", async (req, res) => {
   try {
+    console.log("[gmail] webhook hit", {
+      time: new Date().toISOString(),
+      contentType: req.headers["content-type"],
+      userAgent: req.headers["user-agent"]
+    });
+
     const body = req.body;
 
     console.log("[gmail] raw notification", body);
@@ -213,6 +219,25 @@ console.log("[gmail] resolved connection", {
   email: conn.email,
   status: conn.status
 });
+    const startHistoryId = conn.gmail_history_id || null;
+
+if (!startHistoryId) {
+  console.log("[gmail] no stored gmail_history_id; seeding cursor only", {
+    connectionId: conn.id,
+    incomingHistoryId: historyId
+  });
+
+  await sbPatch(
+    `email_connections?id=eq.${encodeURIComponent(conn.id)}`,
+    {
+      gmail_history_id: String(historyId),
+      gmail_last_push_at: new Date().toISOString()
+    },
+    "return=minimal"
+  );
+
+  return;
+}
 let accessToken = conn.access_token;
 const expiresAt = conn.expires_at ? new Date(conn.expires_at).getTime() : 0;
 
@@ -237,7 +262,7 @@ if (!accessToken || Date.now() >= expiresAt - 60000) {
 // ALWAYS run history after token is valid
 const historyResp = await fetch(
   `https://gmail.googleapis.com/gmail/v1/users/me/history?` +
-  `startHistoryId=${encodeURIComponent(historyId)}&` +
+  `startHistoryId=${encodeURIComponent(startHistoryId)}&` +
   `historyTypes=messageAdded&labelId=INBOX`,
   {
     method: "GET",
@@ -283,11 +308,13 @@ console.log("[gmail] history.list success", {
 if (!messageIds.length) {
   console.log("[gmail] no new message ids from history", {
     connectionId: conn.id,
-    email
+    email,
+    startHistoryId,
+    incomingHistoryId: historyId
   });
-  return;
 }
-  for (const messageId of messageIds) {
+
+for (const messageId of messageIds) {
 
   console.log("[gmail] fetching message", {
     connectionId: conn.id,
@@ -332,10 +359,12 @@ if (!messageIds.length) {
   const references = headerMap["references"] || null;
 
   console.log("[gmail] parsed message headers", {
-    messageId,
-    internetMessageId,
-    subject
-  });
+  messageId,
+  internetMessageId,
+  subject,
+  hasInReplyTo: !!inReplyTo,
+  hasReferences: !!references
+});
 
   if (!internetMessageId) {
   console.log("[gmail] missing internetMessageId -> skip", {
