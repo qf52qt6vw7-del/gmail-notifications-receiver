@@ -16,13 +16,46 @@ app.post("/email/gmail/notifications", async (req, res) => {
   try {
     const body = req.body;
 
-    console.log("[gmail] notification received", {
-      hasBody: !!body,
-      time: new Date().toISOString(),
+    console.log("[gmail] raw notification", body);
+
+    // ACK immediately (VERY IMPORTANT for Pub/Sub)
+    res.status(200).send("ok");
+
+    if (!body?.message?.data) {
+      console.log("[gmail] missing message.data");
+      return;
+    }
+
+    // Decode base64 PubSub payload
+    const decoded = JSON.parse(
+      Buffer.from(body.message.data, "base64").toString("utf8")
+    );
+
+    console.log("[gmail] decoded notification", decoded);
+
+    /*
+    Example decoded payload:
+
+    {
+      emailAddress: "user@gmail.com",
+      historyId: "123456"
+    }
+    */
+
+    const email = decoded?.emailAddress;
+    const historyId = decoded?.historyId;
+
+    if (!email || !historyId) {
+      console.log("[gmail] missing emailAddress or historyId");
+      return;
+    }
+
+    console.log("[gmail] notification parsed", {
+      email,
+      historyId
     });
 
-    // ACK immediately
-    res.status(200).send("ok");
+    // Next step will process this
 
   } catch (err) {
     console.log("[gmail] handler error", err?.message || err);
