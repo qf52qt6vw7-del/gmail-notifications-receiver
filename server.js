@@ -386,16 +386,25 @@ try {
       apikey: SUPABASE_SERVICE_ROLE_KEY,
       Authorization: `Bearer ${SUPABASE_SERVICE_ROLE_KEY}`,
       Prefer: "resolution=ignore-duplicates,return=representation",
+      Accept: "application/json",
     },
     body: JSON.stringify([
       {
         provider: "google",
         connection_id: conn.id,
         subscription_id: "gmail",
-        message_id: internetMessageId
-      }
+        message_id: internetMessageId,
+      },
     ]),
   });
+
+  if (resp.status === 409) {
+    console.log("[gmail] duplicate message -> skip (dedupe 409)", {
+      connectionId: conn.id,
+      internetMessageId,
+    });
+    continue;
+  }
 
   if (!resp.ok) {
     const t = await resp.text().catch(() => "");
@@ -405,7 +414,6 @@ try {
 
   const rows = await resp.json().catch(() => []);
   insertedNew = Array.isArray(rows) && rows.length > 0;
-
 } catch (e) {
   console.log("[gmail] dedupe insert exception", e?.message || e);
   continue;
@@ -413,7 +421,8 @@ try {
 
 if (!insertedNew) {
   console.log("[gmail] duplicate message -> skip", {
-    internetMessageId
+    connectionId: conn.id,
+    internetMessageId,
   });
   continue;
 }
@@ -426,31 +435,44 @@ const senderEmail = from
   ? from.match(/<(.+?)>/)?.[1] || from
   : null;
 
-await sbPost(
-  "email_inbound_messages",
-  [
-    {
-      user_id: conn.user_id,
-      connection_id: conn.id,
-      subscription_id: "gmail",
-      provider: "google",
-      ms_message_id: messageId,
-      internet_message_id: internetMessageId,
-      subject: subject || null,
-      sender_email: senderEmail,
-      received_at: new Date().toISOString(),
-      body_preview: null,
-      raw: msgJson
-    }
-  ],
-  "return=minimal"
-);
+try {
+  await sbPost(
+    "email_inbound_messages",
+    [
+      {
+        user_id: conn.user_id,
+        connection_id: conn.id,
+        subscription_id: "gmail",
+        provider: "google",
+        ms_message_id: messageId,
+        internet_message_id: internetMessageId,
+        subject: subject || null,
+        sender_email: senderEmail,
+        received_at: new Date().toISOString(),
+        body_preview: null,
+        raw: msgJson,
+      },
+    ],
+    "return=minimal"
+  );
 
-console.log("[gmail] inbound message inserted", {
-  connectionId: conn.id,
-  messageId,
-  internetMessageId
-});
+  console.log("[gmail] inbound message inserted", {
+    connectionId: conn.id,
+    messageId,
+    internetMessageId,
+  });
+} catch (e) {
+  const msg = String(e?.message || e);
+
+  if (msg.includes("409") || msg.includes("duplicate key value")) {
+    console.log("[gmail] inbound duplicate -> skip", {
+      connectionId: conn.id,
+      messageId,
+      internetMessageId,
+    });
+  } else {
+    throw e;
+  }
 }
 // Next step will process this
 const latestHistoryId = historyJson?.historyId || historyId;
