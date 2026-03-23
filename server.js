@@ -54,7 +54,26 @@ async function sbPost(path, body, prefer = "return=representation") {
 
   return text ? JSON.parse(text) : [];
 }
+async function sbUpsert(path, body, onConflict, prefer = "return=representation") {
+  const url = new URL(`${SUPABASE_URL}/rest/v1/${path}`);
+  if (onConflict) url.searchParams.set("on_conflict", onConflict);
 
+  const resp = await fetch(url.toString(), {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      apikey: SUPABASE_SERVICE_ROLE_KEY,
+      Authorization: `Bearer ${SUPABASE_SERVICE_ROLE_KEY}`,
+      Prefer: `resolution=merge-duplicates,${prefer}`,
+      Accept: "application/json",
+    },
+    body: JSON.stringify(body),
+  });
+
+  const text = await resp.text().catch(() => "");
+  if (!resp.ok) throw new Error(`Supabase UPSERT failed ${resp.status}: ${text}`);
+  return text ? JSON.parse(text) : [];
+}
 async function sbPatch(path, body, prefer = "return=minimal") {
   const resp = await fetch(`${SUPABASE_URL}/rest/v1/${path}`, {
     method: "PATCH",
@@ -219,306 +238,43 @@ console.log("[gmail] resolved connection", {
   email: conn.email,
   status: conn.status
 });
-    const startHistoryId = conn.gmail_history_id || null;
-
-if (!startHistoryId) {
-  console.log("[gmail] no stored gmail_history_id; seeding cursor only", {
-    connectionId: conn.id,
-    incomingHistoryId: historyId
-  });
-
-  await sbPatch(
-    `email_connections?id=eq.${encodeURIComponent(conn.id)}`,
-    {
-      gmail_history_id: String(historyId),
-      gmail_last_push_at: new Date().toISOString()
-    },
-    "return=minimal"
-  );
-
-  return;
-}
-let accessToken = conn.access_token;
-const expiresAt = conn.expires_at ? new Date(conn.expires_at).getTime() : 0;
-
-if (!accessToken || Date.now() >= expiresAt - 60000) {
-  console.log("[gmail] refreshing google access token", { connectionId: conn.id });
-
-  const refreshed = await refreshGoogleAccessToken(conn.refresh_token);
-  accessToken = refreshed.access_token;
-
-  await sbPatch(
-    `email_connections?id=eq.${encodeURIComponent(conn.id)}`,
-    {
-      access_token: refreshed.access_token,
-      expires_at: refreshed.expires_at
-    },
-    "return=minimal"
-  );
-
-  console.log("[gmail] token refreshed", { connectionId: conn.id });
-}
-
-// ALWAYS run history after token is valid
-const historyResp = await fetch(
-  `https://gmail.googleapis.com/gmail/v1/users/me/history?` +
-  `startHistoryId=${encodeURIComponent(startHistoryId)}&` +
-  `historyTypes=messageAdded&labelId=INBOX`,
-  {
-    method: "GET",
-    headers: {
-      Authorization: `Bearer ${accessToken}`,
-      Accept: "application/json"
-    }
-  }
-);
-
-const historyText = await historyResp.text().catch(() => "");
-if (!historyResp.ok) {
-  console.log("[gmail] history.list failed", {
-    connectionId: conn.id,
-    status: historyResp.status,
-    body: historyText
-  });
-  return;
-}
-
-const historyJson = historyText ? JSON.parse(historyText) : {};
-const historyRows = Array.isArray(historyJson.history) ? historyJson.history : [];
-
-const messageIds = [
-  ...new Set(
-    historyRows.flatMap((h) =>
-      Array.isArray(h.messagesAdded)
-        ? h.messagesAdded
-            .map((m) => m?.message?.id)
-            .filter(Boolean)
-        : []
-    )
-  )
-];
-
-console.log("[gmail] history.list success", {
-  connectionId: conn.id,
-  historyCount: historyRows.length,
-  messageCount: messageIds.length,
-  latestHistoryId: historyJson.historyId || null
-});
-
-if (!messageIds.length) {
-  console.log("[gmail] no new message ids from history", {
-    connectionId: conn.id,
-    email,
-    startHistoryId,
-    incomingHistoryId: historyId
-  });
-}
-
-for (const messageId of messageIds) {
-
-  console.log("[gmail] fetching message", {
-    connectionId: conn.id,
-    messageId
-  });
-
-  const msgResp = await fetch(
-    `https://gmail.googleapis.com/gmail/v1/users/me/messages/${encodeURIComponent(messageId)}?format=metadata&metadataHeaders=Message-ID&metadataHeaders=Subject&metadataHeaders=From&metadataHeaders=In-Reply-To&metadataHeaders=References`,
-    {
-      method: "GET",
-      headers: {
-        Authorization: `Bearer ${accessToken}`,
-        Accept: "application/json"
-      }
-    }
-  );
-
-  const msgText = await msgResp.text().catch(() => "");
-
-  if (!msgResp.ok) {
-    console.log("[gmail] message fetch failed", {
-      connectionId: conn.id,
-      messageId,
-      status: msgResp.status,
-      body: msgText
-    });
-    continue;
-  }
-
-  const msgJson = msgText ? JSON.parse(msgText) : null;
-
-  const headers = msgJson?.payload?.headers || [];
-
-  const headerMap = Object.fromEntries(
-    headers.map(h => [h.name?.toLowerCase(), h.value])
-  );
-
-  const internetMessageId = headerMap["message-id"] || null;
-  const subject = headerMap["subject"] || null;
-  const from = headerMap["from"] || null;
-  const inReplyTo = headerMap["in-reply-to"] || null;
-  const references = headerMap["references"] || null;
-
-  console.log("[gmail] parsed message headers", {
-  messageId,
-  internetMessageId,
-  subject,
-  hasInReplyTo: !!inReplyTo,
-  hasReferences: !!references
-});
-
-  if (!internetMessageId) {
-  console.log("[gmail] missing internetMessageId -> skip", {
-    messageId
-  });
-  continue;
-}
-
-/*
-DEDUPLICATION
-*/
-let insertedNew = false;
+const historyIdStr = String(historyId);
+const dedupeKey = `gmail:${conn.id}:${historyIdStr}`;
 
 try {
-  const resp = await fetch(`${SUPABASE_URL}/rest/v1/email_webhook_dedupe`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      apikey: SUPABASE_SERVICE_ROLE_KEY,
-      Authorization: `Bearer ${SUPABASE_SERVICE_ROLE_KEY}`,
-      Prefer: "resolution=ignore-duplicates,return=representation",
-      Accept: "application/json",
-    },
-    body: JSON.stringify([
+  await sbUpsert(
+    "gmail_inbound_notification_queue",
+    [
       {
         provider: "google",
         connection_id: conn.id,
         subscription_id: "gmail",
-        message_id: internetMessageId,
+        history_id: historyIdStr,
+        payload: body,
+        dedupe_key: dedupeKey,
+        status: "pending",
+        last_error: null,
+        error_code: null,
+        error_message: null,
+        locked_at: null,
       },
-    ]),
-  });
+    ],
+    "dedupe_key",
+    "return=minimal"
+  );
 
-  if (resp.status === 409) {
-    console.log("[gmail] duplicate message -> skip (dedupe 409)", {
-      connectionId: conn.id,
-      internetMessageId,
-    });
-    continue;
-  }
-
-  if (!resp.ok) {
-    const t = await resp.text().catch(() => "");
-    console.log("[gmail] dedupe insert failed", resp.status, t);
-    continue;
-  }
-
-  const rows = await resp.json().catch(() => []);
-  insertedNew = Array.isArray(rows) && rows.length > 0;
-} catch (e) {
-  console.log("[gmail] dedupe insert exception", e?.message || e);
-  continue;
-}
-
-if (!insertedNew) {
-  console.log("[gmail] duplicate message -> skip", {
+  console.log("[gmail] queue enqueued", {
     connectionId: conn.id,
-    internetMessageId,
-  });
-  continue;
-}
-
-/*
-INSERT INBOUND MESSAGE
-*/
-
-const senderEmail = from
-  ? from.match(/<(.+?)>/)?.[1] || from
-  : null;
-
-try {
-await sbPost(
-  "email_inbound_messages",
-  [
-    {
-      user_id: conn.user_id,
-      connection_id: conn.id,
-      subscription_id: "gmail",
-      provider: "google",
-      ms_message_id: messageId,
-      internet_message_id: internetMessageId,
-      subject: subject || null,
-      sender_email: senderEmail,
-      received_at: new Date().toISOString(),
-      body_preview: null,
-      in_reply_to: inReplyTo || null,
-      references_header: references || null,
-      raw: msgJson,
-    },
-  ],
-  "return=minimal"
-);
-
-  console.log("[gmail] inbound message inserted", {
-    connectionId: conn.id,
-    messageId,
-    internetMessageId,
+    historyId: historyIdStr,
+    dedupeKey,
   });
 } catch (e) {
-  const msg = String(e?.message || e);
-
-  if (msg.includes("409") || msg.includes("duplicate key value")) {
-    console.log("[gmail] inbound duplicate -> skip", {
-      connectionId: conn.id,
-      messageId,
-      internetMessageId,
-    });
-  } else {
-    throw e;
-  }
+  console.log("[gmail] enqueue failed", {
+    connectionId: conn.id,
+    historyId: historyIdStr,
+    err: String(e?.message || e),
+  });
 }
-// Next step will process this
-const latestHistoryId = historyJson?.historyId || historyId;
-
-if (latestHistoryId) {
-  const currentHistoryId = conn.gmail_history_id || null;
-
-  const shouldAdvance =
-    !currentHistoryId ||
-    BigInt(String(latestHistoryId)) > BigInt(String(currentHistoryId));
-
-  if (shouldAdvance) {
-    await sbPatch(
-      `email_connections?id=eq.${encodeURIComponent(conn.id)}`,
-      {
-        gmail_history_id: String(latestHistoryId),
-        gmail_last_push_at: new Date().toISOString()
-      },
-      "return=minimal"
-    );
-
-    console.log("[gmail] advanced gmail_history_id", {
-      connectionId: conn.id,
-      previous: currentHistoryId,
-      next: String(latestHistoryId)
-    });
-  } else {
-    await sbPatch(
-      `email_connections?id=eq.${encodeURIComponent(conn.id)}`,
-      {
-        gmail_last_push_at: new Date().toISOString()
-      },
-      "return=minimal"
-    );
-
-    console.log("[gmail] gmail_history_id not advanced", {
-      connectionId: conn.id,
-      current: currentHistoryId,
-      latestHistoryId: String(latestHistoryId)
-    });
-  }
-}
-  }
-  } catch (err) {
     console.log("[gmail] handler error", err?.message || err);
 
     if (!res.headersSent) {
