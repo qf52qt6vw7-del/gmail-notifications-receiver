@@ -275,6 +275,8 @@ try {
     err: String(e?.message || e),
   });
 }
+
+  } catch (err) {
     console.log("[gmail] handler error", err?.message || err);
 
     if (!res.headersSent) {
