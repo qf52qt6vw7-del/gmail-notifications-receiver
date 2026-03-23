@@ -436,25 +436,27 @@ const senderEmail = from
   : null;
 
 try {
-  await sbPost(
-    "email_inbound_messages",
-    [
-      {
-        user_id: conn.user_id,
-        connection_id: conn.id,
-        subscription_id: "gmail",
-        provider: "google",
-        ms_message_id: messageId,
-        internet_message_id: internetMessageId,
-        subject: subject || null,
-        sender_email: senderEmail,
-        received_at: new Date().toISOString(),
-        body_preview: null,
-        raw: msgJson,
-      },
-    ],
-    "return=minimal"
-  );
+await sbPost(
+  "email_inbound_messages",
+  [
+    {
+      user_id: conn.user_id,
+      connection_id: conn.id,
+      subscription_id: "gmail",
+      provider: "google",
+      ms_message_id: messageId,
+      internet_message_id: internetMessageId,
+      subject: subject || null,
+      sender_email: senderEmail,
+      received_at: new Date().toISOString(),
+      body_preview: null,
+      in_reply_to: inReplyTo || null,
+      references_header: references || null,
+      raw: msgJson,
+    },
+  ],
+  "return=minimal"
+);
 
   console.log("[gmail] inbound message inserted", {
     connectionId: conn.id,
